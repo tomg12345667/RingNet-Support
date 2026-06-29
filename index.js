@@ -25,24 +25,36 @@ const CAT_PST            = process.env.CAT_PST;
 const CAT_GEN            = process.env.CAT_GEN;
 const CAT_HOLD           = process.env.CAT_HOLD;
 const ERROR_CHANNEL      = process.env.ERROR_CHANNEL;
-const TRANSCRIPT_CHANNEL = process.env.TRANSCRIPT_CHANNEL; // 1520938699637129276
+const TRANSCRIPT_CHANNEL = process.env.TRANSCRIPT_CHANNEL;
 const PANEL_EMOJI        = "✉️";
 
 // ─── Counter ──────────────────────────────────────────────────────────────────
 const COUNTER_FILE = path.join(__dirname, "counter.json");
+
+// Auto-create counter.json if it does not exist
+if (!fs.existsSync(COUNTER_FILE)) {
+  try { fs.writeFileSync(COUNTER_FILE, JSON.stringify({ counter: 1 }), "utf-8"); }
+  catch (e) { console.error("Could not create counter.json:", e.message); }
+}
+
 function loadCounter() {
-  try { if (fs.existsSync(COUNTER_FILE)) return JSON.parse(fs.readFileSync(COUNTER_FILE, "utf-8")).counter ?? 1; } catch {}
+  try { return JSON.parse(fs.readFileSync(COUNTER_FILE, "utf-8")).counter ?? 1; } catch {}
   return 1;
 }
-function saveCounter(val) { fs.writeFileSync(COUNTER_FILE, JSON.stringify({ counter: val }), "utf-8"); }
+function saveCounter(val) {
+  try { fs.writeFileSync(COUNTER_FILE, JSON.stringify({ counter: val }), "utf-8"); }
+  catch (e) { console.error("Could not save counter.json:", e.message); }
+}
+
 let ticketCounter = loadCounter();
 function nextTicketNumber() { const n = ticketCounter++; saveCounter(ticketCounter); return n; }
 
 // ─── Registries ───────────────────────────────────────────────────────────────
-const ticketRegistry = new Map(); // channelId -> { ticketNumber, userId, userTag, openedAt, isAup, closeTimeout }
+const ticketRegistry = new Map(); // channelId -> ticketData
 const userTicketMap  = new Map(); // userId -> channelId
 const panelMessages  = new Set(); // messageId
 const pendingExtData = new Map(); // userId -> ext data
+const closeTimers    = new Map(); // channelId -> timeoutId
 
 // ─── Client ───────────────────────────────────────────────────────────────────
 const client = new Client({
@@ -97,6 +109,16 @@ async function resolveUser(guild, input) {
   return null;
 }
 
+function cancelCloseTimer(channelId, channel) {
+  if (closeTimers.has(channelId)) {
+    clearTimeout(closeTimers.get(channelId));
+    closeTimers.delete(channelId);
+    if (channel) channel.send("Automatic close has been cancelled due to activity in this ticket.").catch(() => {});
+    return true;
+  }
+  return false;
+}
+
 // ─── Ticket creation ──────────────────────────────────────────────────────────
 async function createTicket(guild, user, { category = CAT_GEN, isAup = false, manualReason = null } = {}) {
   if (userTicketMap.has(user.id)) {
@@ -118,7 +140,6 @@ async function createTicket(guild, user, { category = CAT_GEN, isAup = false, ma
   ticketRegistry.set(channel.id, {
     ticketNumber, userId: user.id, userTag: user.tag,
     openedAt: new Date(), isAup, closeTimeout: null,
-    messages: [], // store { time, author, content } for transcript
   });
   userTicketMap.set(user.id, channel.id);
 
@@ -146,9 +167,8 @@ async function createTicket(guild, user, { category = CAT_GEN, isAup = false, ma
   return { channel, ticketNumber, alreadyOpen: false };
 }
 
-// ─── Transcript as .txt file ──────────────────────────────────────────────────
+// ─── Transcript ───────────────────────────────────────────────────────────────
 async function sendTranscript(channel, ticketData, reason, closedByTag) {
-  // Fetch all messages from channel
   const messages = [];
   let lastId;
   while (true) {
@@ -195,15 +215,12 @@ async function sendTranscript(channel, ticketData, reason, closedByTag) {
   const transcript = lines.join("\n");
   const fileName   = `transcript-${ticketData?.ticketNumber ?? channel.id}.txt`;
   const buffer     = Buffer.from(transcript, "utf-8");
-  const attachment = new AttachmentBuilder(buffer, { name: fileName });
 
-  // DM user the transcript
   try {
     const user = await client.users.fetch(ticketData.userId);
     await user.send({ content: `Transcript for your ticket #${ticketData?.ticketNumber ?? "?"}:`, files: [new AttachmentBuilder(buffer, { name: fileName })] });
   } catch {}
 
-  // Post to transcript channel
   if (TRANSCRIPT_CHANNEL) {
     try {
       const tc = await client.channels.fetch(TRANSCRIPT_CHANNEL);
@@ -224,9 +241,10 @@ async function sendTranscript(channel, ticketData, reason, closedByTag) {
 
 // ─── Close ticket ─────────────────────────────────────────────────────────────
 async function closeTicket(channel, ticketData, reason, closedByTag) {
-  if (ticketData.closeTimeout) clearTimeout(ticketData.closeTimeout);
+  cancelCloseTimer(channel.id, null);
 
-  try { await sendTranscript(channel, ticketData, reason, closedByTag); } catch (err) { await reportError(err, "closeTicket > sendTranscript"); }
+  try { await sendTranscript(channel, ticketData, reason, closedByTag); }
+  catch (err) { await reportError(err, "closeTicket > sendTranscript"); }
 
   try {
     const user = await client.users.fetch(ticketData.userId);
@@ -251,7 +269,7 @@ async function closeTicket(channel, ticketData, reason, closedByTag) {
   }, 5000);
 }
 
-// ─── Send reply embed to user + channel ───────────────────────────────────────
+// ─── Reply helper ─────────────────────────────────────────────────────────────
 async function sendReply(message, text, isAnon) {
   const ticketData = ticketRegistry.get(message.channel.id);
   if (!ticketData) { await message.reply("This is not a ticket channel."); return; }
@@ -271,24 +289,19 @@ async function sendReply(message, text, isAnon) {
     .setTimestamp();
 
   const channelEmbed = new EmbedBuilder()
-    .setAuthor({ name: `${displayName} → ${ticketData.userTag}`, iconURL: avatar })
+    .setAuthor({ name: `${displayName} -> ${ticketData.userTag}`, iconURL: avatar })
     .setDescription(text)
     .setColor(color)
     .setFooter({ text: roleName })
     .setTimestamp();
 
-  // Delete the command message
   try { await message.delete(); } catch {}
 
-  // Send to user via DM
   try {
     const user = await client.users.fetch(ticketData.userId);
     await user.send({ embeds: [userEmbed] });
-  } catch {
-    await message.channel.send("Could not DM the user — they may have DMs disabled.");
-  }
+  } catch { await message.channel.send("Could not DM the user — they may have DMs disabled."); }
 
-  // Send embed to ticket channel
   await message.channel.send({ embeds: [channelEmbed] });
 }
 
@@ -311,20 +324,33 @@ client.on("messageReactionAdd", async (reaction, user) => {
   } catch (err) { await reportError(err, "messageReactionAdd"); }
 });
 
-// ─── DM handler ───────────────────────────────────────────────────────────────
+// ─── Message handler ──────────────────────────────────────────────────────────
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
+  // ── DM to bot ──
   if (!message.guild) {
     const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
     if (!guild) return;
 
+    // Cancel close timer if user DMs while ticket is on timed close
     if (userTicketMap.has(message.author.id)) {
       const channelId = userTicketMap.get(message.author.id);
+
+      // Cancel timed close if active
+      if (closeTimers.has(channelId)) {
+        clearTimeout(closeTimers.get(channelId));
+        closeTimers.delete(channelId);
+        try {
+          const ch = await client.channels.fetch(channelId);
+          await ch.send("Automatic close has been cancelled — the user sent a message.");
+        } catch {}
+      }
+
+      // Forward message to ticket channel
       try {
-        const channel    = await client.channels.fetch(channelId);
-        const ticketData = ticketRegistry.get(channelId);
-        const embed = new EmbedBuilder()
+        const channel = await client.channels.fetch(channelId);
+        const embed   = new EmbedBuilder()
           .setAuthor({ name: message.author.tag, iconURL: message.author.displayAvatarURL() })
           .setDescription(message.content || "[No text content]")
           .setColor(0x5865f2)
@@ -335,7 +361,7 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
-    // Open new ticket from DM
+    // No existing ticket — open one from DM
     try {
       const { channel, ticketNumber } = await createTicket(guild, message.author);
       const embed = new EmbedBuilder()
@@ -349,18 +375,24 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // ── Server commands ────────────────────────────────────────────────────────
-  if (!message.content.startsWith("?")) return;
-  const member  = message.member;
+  // ── Server messages ──
   const content = message.content;
+  const member  = message.member;
+
+  // Cancel timed close if anyone sends a message in a ticket channel
+  if (ticketRegistry.has(message.channel.id) && !content.startsWith("?close")) {
+    cancelCloseTimer(message.channel.id, message.channel);
+  }
+
+  if (!content.startsWith("?")) return;
 
   // ── ?sendpanel ──
   if (content.startsWith("?sendpanel")) {
     if (!isStaff(member)) return message.reply("Only staff can deploy panels.");
     const sent = await message.channel.send(
-      `React with ✉️ to open a support ticket with RingNet CPBX. A staff member will be in touch via this bot.`
+      `React with ${PANEL_EMOJI} to open a support ticket with RingNet CPBX. A staff member will be in touch via this bot.`
     );
-    await sent.react("✉️");
+    await sent.react(PANEL_EMOJI);
     panelMessages.add(sent.id);
     await message.delete().catch(() => {});
     return;
@@ -368,15 +400,13 @@ client.on("messageCreate", async (message) => {
 
   // ── ?r <message> ──
   if (content.startsWith("?r ") || content === "?r") {
-    const text = content.startsWith("?r ") ? content.slice(3).trim() : "";
-    await sendReply(message, text, false);
+    await sendReply(message, content.startsWith("?r ") ? content.slice(3).trim() : "", false);
     return;
   }
 
   // ── ?ar <message> ──
   if (content.startsWith("?ar ") || content === "?ar") {
-    const text = content.startsWith("?ar ") ? content.slice(4).trim() : "";
-    await sendReply(message, text, true);
+    await sendReply(message, content.startsWith("?ar ") ? content.slice(4).trim() : "", true);
     return;
   }
 
@@ -395,15 +425,22 @@ client.on("messageCreate", async (message) => {
       const closeAt = new Date(Date.now() + ms);
       const ts      = Math.floor(closeAt.getTime() / 1000);
 
-      await message.channel.send(`This ticket will be closed <t:${ts}:R> (<t:${ts}:f>).`);
+      // Clear any existing timer first
+      if (closeTimers.has(message.channel.id)) {
+        clearTimeout(closeTimers.get(message.channel.id));
+        closeTimers.delete(message.channel.id);
+      }
 
-      if (ticketData.closeTimeout) clearTimeout(ticketData.closeTimeout);
-      ticketData.closeTimeout = setTimeout(async () => {
+      await message.channel.send(`This ticket will be closed <t:${ts}:R> (<t:${ts}:f>). Any message from staff or the user will cancel the automatic close.`);
+
+      const timer = setTimeout(async () => {
         const ch = await client.channels.fetch(message.channel.id).catch(() => null);
         const td = ticketRegistry.get(message.channel.id);
         if (ch && td) await closeTicket(ch, td, `Auto-closed after ${amount}${unit}`, "Auto-close");
+        closeTimers.delete(message.channel.id);
       }, ms);
-      ticketRegistry.set(message.channel.id, ticketData);
+
+      closeTimers.set(message.channel.id, timer);
       return;
     }
 
