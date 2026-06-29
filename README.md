@@ -1,4 +1,5 @@
 # RingNet CPBX - Modmail Ticket Bot
+### Please fork and edit this ReadMe for your usage.
 
 A Discord modmail bot for RingNet CPBX. Tickets are handled via direct messages between users and the bot, with staff managing conversations through dedicated ticket channels in the server.
 
