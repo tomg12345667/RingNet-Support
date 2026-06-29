@@ -33,8 +33,8 @@ A Discord modmail bot for RingNet CPBX. Tickets are handled via direct messages 
 ### 1. Clone the repository
 
 ```bash
-git clone <your-repo-url>
-cd ringnet-cpbx-bot
+git clone https://github.com/tomg12345667/RingNet-Support.git
+cd RingNet-Support
 ```
 
 ### 2. Install dependencies
