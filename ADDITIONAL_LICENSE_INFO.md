@@ -14,18 +14,18 @@ You should have received a copy of the GNU General Public License along with thi
 
 The GPLv3 grants you the following freedoms:
 
-- **Use** — Run the software for any purpose
-- **Study** — Inspect and understand how it works
-- **Modify** — Change it to suit your needs
-- **Distribute** — Share copies of the original or modified versions
+- **Use** - Run the software for any purpose
+- **Study** - Inspect and understand how it works
+- **Modify** - Change it to suit your needs
+- **Distribute** - Share copies of the original or modified versions
 
 ### Key Conditions
 
-- **Copyleft** — Any modified version you distribute must also be licensed under GPLv3
-- **Source disclosure** — If you distribute the software, you must make the source code available
-- **License and copyright notices** — You must retain all original license and copyright notices
-- **No additional restrictions** — You may not impose further restrictions on recipients' rights under the license
-- **Patent grant** — Contributors grant you a license to any patents they hold that are necessary to use the software
+- **Copyleft** - Any modified version you distribute must also be licensed under GPLv3
+- **Source disclosure** - If you distribute the software, you must make the source code available
+- **License and copyright notices** - You must retain all original license and copyright notices
+- **No additional restrictions** - You may not impose further restrictions on recipients' rights under the license
+- **Patent grant** - Contributors grant you a license to any patents they hold that are necessary to use the software
 
 ### What You Cannot Do
 
